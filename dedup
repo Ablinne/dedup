@@ -94,9 +94,9 @@ class InodeSets(list):
     def __init__(self, inode_sets, inodes):
         super(InodeSets, self).__init__(inode_sets)
         self.inodes = inodes
-        self.bs = 2**20
+        self.bs = 2**20    # default 1 mebibyte block size
 
-    def group_inodes_by_content(self): # default 1 mebibyte block size
+    def group_inodes_by_content(self):
         pos = 0 #start at zeroth block
         inode_sets = self
         while inode_sets:
