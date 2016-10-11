@@ -77,7 +77,6 @@ class InodeSet(list):
         for _, _, name, _ in names[1:]:
             os.unlink(name)
             os.link(origname, name)
-            shutil.copystat(origname, name)
 
     def print_dedup_inode(self, **kwargs):
         if not self.identical:
