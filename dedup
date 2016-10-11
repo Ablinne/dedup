@@ -10,17 +10,31 @@ import shutil
 import codecs
 
 class Inodes(dict):
-    __slots__ = ['rank']
+    __slots__ = ['rank', 'devicenum']
 
     def __init__(self):
         super(Inodes, self).__init__(self)
+        self.devicenum = None
         self.rank = 0
 
     def discover(self, path):
-        for dirpath, dirnames, filenames in os.walk(path):
+        pdev = os.lstat(path).st_dev
+
+        if not self.devicenum:
+            self.devicenum = pdev
+        if self.devicenum != pdev:
+            raise ValueError("All paths should be on the same device.")
+
+        for dirpath, dirnames, filenames in os.walk(path, followlinks=False):
+            for dirname in dirnames[:]:
+                if os.lstat(osp.join(dirpath, dirname)).st_dev != self.devicenum:
+                    dirnames.remove(dirname)
+
             for filename in filenames:
                 filepath = osp.join(dirpath, filename)
                 fstat = os.lstat(filepath)
+                dev = fstat.st_dev
+
                 if not stat.S_ISREG(fstat.st_mode) or fstat.st_size == 0:
                     continue
                 inode = self.setdefault(fstat.st_ino, (fstat.st_size, []))
