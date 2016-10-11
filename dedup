@@ -1,0 +1,159 @@
+#!/usr/bin/env python3
+
+import sys
+import argparse
+import os
+import os.path as osp
+import stat
+import shlex
+import shutil
+
+class Inodes(dict):
+    __slots__ = ['rank']
+
+    def __init__(self):
+        super(Inodes, self).__init__(self)
+        self.rank = 0
+
+    def discover(self, path):
+        for dirpath, dirnames, filenames in os.walk(path):
+            for filename in filenames:
+                filepath = osp.join(dirpath, filename)
+                fstat = os.lstat(filepath)
+                if not stat.S_ISREG(fstat.st_mode) or fstat.st_size == 0:
+                    continue
+                inode = self.setdefault(fstat.st_ino, (fstat.st_size, []))
+                inode[1].append((self.rank,filepath))
+        self.rank += 1
+
+    def group_inodes_by_size(self):
+        sizes = dict()
+        for inum, (size, _) in self.items():
+            sset = sizes.setdefault(size, InodeSet([], self))
+            sset.append(inum)
+        return InodeSets(filter(lambda x: len(x)>1, sizes.values()), self)
+
+
+class InodeSet(list):
+    __slots__ = ['inodes', 'identical']
+
+    def __init__(self, inode_set, inodes):
+        super(InodeSet, self).__init__(inode_set)
+        self.inodes = inodes
+        self.identical = False
+
+    def split_inode_set_by_range(self, start, bs):
+        blockdict = dict()
+        for inode in self:
+            example_path = self.inodes[inode][1][0][1]
+            with open(example_path, 'rb') as f:
+                f.seek(start)
+                blockdata = f.read(bs)
+            new_inode_set = blockdict.setdefault(blockdata, InodeSet([], self.inodes))
+            new_inode_set.append(inode)
+        return InodeSets(filter(lambda x: len(x)>1, blockdict.values()), self.inodes)
+
+    def print_inodes_info(self, **kwargs):
+        example_inode = self[0]
+        size = self.inodes[example_inode][0]
+        origname = self.sort_inode_names()[0][2]
+        print(size, self, [self.inodes[inode][1] for inode in self], origname, **kwargs)
+
+    def sort_inode_names(self):
+        names = []
+        for inode in self:
+            for rank, name in self.inodes[inode][1]:
+                depth = name.count(os.pathsep)
+                names.append((rank, depth, name, inode))
+        names.sort(key= lambda tup: (tup[0], tup[1]))
+        return names
+
+    def do_dedup_inode(self):
+        if not self.identical:
+            raise ValueError()
+        names = self.sort_inode_names()
+        origname = names[0][2]
+        for _, _, name, _ in names[1:]:
+            os.unlink(name)
+            os.link(origname, name)
+            shutil.copystat(origname, name)
+
+    def print_dedup_inode(self, **kwargs):
+        if not self.identical:
+            raise ValueError()
+        names = self.sort_inode_names()
+        origname = names[0][2]
+        qorig = shlex.quote(origname)
+        for _, _, name, _ in names[1:]:
+            print('cp -la --remove-destination', qorig, shlex.quote, **kwargs)
+
+
+class InodeSets(list):
+    __slots__ = ['bs', 'inodes']
+
+    def __init__(self, inode_sets, inodes):
+        super(InodeSets, self).__init__(inode_sets)
+        self.inodes = inodes
+        self.bs = 2**20
+
+    def group_inodes_by_content(self): # default 1 mebibyte block size
+        pos = 0 #start at zeroth block
+        inode_sets = self
+        while inode_sets:
+            remaining_inode_sets = []
+            start = pos*self.bs
+            end = start+self.bs
+            for input_inode_set in inode_sets:
+                size = self.inodes[input_inode_set[0]][0]
+                new_inode_sets = input_inode_set.split_inode_set_by_range(start, self.bs)
+
+                if size<=end:
+                    for inode_set in new_inode_sets:
+                        inode_set.identical = True
+                        yield inode_set
+                else:
+                    remaining_inode_sets.extend(new_inode_sets)
+
+            inode_sets = remaining_inode_sets
+            pos += 1
+
+
+def make_parser():
+    parser = argparse.ArgumentParser(description="Deduplicate files")
+    actions = parser.add_argument_group(title='Actions', description='At least one action should be performed')
+    actions.add_argument('--make-hard-links',    action='store_true', help="Perform deduplication by making hard links")
+    actions.add_argument('--print-dedup-script', action='store_true', help="Print shell script to perform deduplication later (to stdout)")
+    actions.add_argument('--print-info',         action='store_true', help="Print info about the identified deduplication groups (to stderr)")
+    parser.add_argument('dirs', metavar="DIR", nargs='+')
+    return parser
+
+def check_args(parser):
+    args = parser.parse_args()
+
+    if not any([args.make_hard_links, args.print_info, args.print_dedup_script]):
+        parser.print_help()
+        sys.exit(1)
+
+    return args
+
+
+def main(args):
+    inodes = Inodes()
+    for path in args.dirs:
+        inodes.discover(path)
+
+    inode_sets = inodes.group_inodes_by_size()
+
+    for final_inode_set in inode_sets.group_inodes_by_content():
+        if args.make_hard_links:
+            final_inode_set.do_dedup_inode()
+        if args.print_info:
+            final_inode_set.print_inodes_info(file = sys.stderr)
+        if args.print_dedup_script:
+            final_inode_set.print_dedup_inode()
+
+
+if __name__=="__main__":
+    parser = make_parser()
+    args = check_args(parser)
+    main(args)
