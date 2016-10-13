@@ -8,6 +8,10 @@ import stat
 import shlex
 import shutil
 import codecs
+import collections
+
+Inode = collections.namedtuple("Inode", ['size', 'mtime', 'files'])
+Rankedfilename = collections.namedtuple("Rankedfilename", ['filename', 'rank'])
 
 class Inodes(dict):
     __slots__ = ['rank', 'devicenum']
@@ -37,13 +41,26 @@ class Inodes(dict):
 
                 if not stat.S_ISREG(fstat.st_mode) or fstat.st_size == 0:
                     continue
-                inode = self.setdefault(fstat.st_ino, (fstat.st_size, []))
-                inode[1].append((self.rank,filepath))
+
+                rfname = Rankedfilename(
+                    filename = filepath,
+                    rank = self.rank
+                )
+                if fstat.st_ino in self:
+                    self[fstat.st_ino].files.append(rfname)
+                else:
+                    self[fstat.st_ino] = Inode(
+                        size = fstat.st_size,
+                        mtime = fstat.st_mtime,
+                        files = [rfname]
+                    )
+
         self.rank += 1
 
     def group_inodes_by_size(self):
         sizes = dict()
-        for inum, (size, _) in self.items():
+        for inum, inode in self.items():
+            size = inode.size
             sset = sizes.setdefault(size, InodeSet([], self))
             sset.append(inum)
         return InodeSets(filter(lambda x: len(x)>1, sizes.values()), self)
@@ -51,6 +68,7 @@ class Inodes(dict):
 
 class InodeSet(list):
     __slots__ = ['inodes', 'identical']
+    InodeNameTup = collections.namedtuple("InodeNameTup", ['rank', 'depth', 'filename', 'inode', 'mtime'])
 
     def __init__(self, inode_set, inodes):
         super(InodeSet, self).__init__(inode_set)
@@ -60,7 +78,7 @@ class InodeSet(list):
     def split_inode_set_by_range(self, start, bs):
         blockdict = dict()
         for inode in self:
-            example_path = self.inodes[inode][1][0][1]
+            example_path = self.inodes[inode].files[0].filename
             with open(example_path, 'rb') as f:
                 f.seek(start)
                 blockdata = f.read(bs)
@@ -70,25 +88,29 @@ class InodeSet(list):
 
     def print_inodes_info(self, **kwargs):
         example_inode = self[0]
-        size = self.inodes[example_inode][0]
-        origname = self.sort_inode_names()[0][2]
-        print(size, self, [self.inodes[inode][1] for inode in self], origname, **kwargs)
+        size = self.inodes[example_inode].size
+        origname = self.sort_inode_names()[0].filename
+        print(size, self, [self.inodes[inode].files for inode in self], origname, **kwargs)
 
     def sort_inode_names(self):
         names = []
         for inode in self:
-            for rank, name in self.inodes[inode][1]:
+            mtime = self.inodes[inode].mtime
+            for rfname in self.inodes[inode].files:
+                name = rfname.filename
+                rank = rfname.rank
                 depth = name.count(os.pathsep)
-                names.append((rank, depth, name, inode))
-        names.sort(key= lambda tup: (tup[0], tup[1]))
+                names.append(self.InodeNameTup(rank, depth, name, inode, mtime))
+        names.sort(key= lambda tup: (tup.rank, -tup.mtime, tup.depth))
         return names
 
     def do_dedup_inode(self):
         if not self.identical:
             raise ValueError()
         names = self.sort_inode_names()
-        origname = names[0][2]
-        for _, _, name, _ in names[1:]:
+        origname = names[0].filename
+        for intup in names[1:]:
+            name = intup.filename
             os.unlink(name)
             os.link(origname, name)
 
@@ -96,10 +118,10 @@ class InodeSet(list):
         if not self.identical:
             raise ValueError()
         names = self.sort_inode_names()
-        origname = names[0][2]
+        origname = names[0].filename
         qorig = shlex.quote(origname)
-        for _, _, name, _ in names[1:]:
-            print('cp -la --remove-destination', qorig, shlex.quote(name), **kwargs)
+        for intup in names[1:]:
+            print('cp -la --remove-destination', qorig, shlex.quote(intup.filename), **kwargs)
 
 
 class InodeSets(list):
@@ -118,7 +140,7 @@ class InodeSets(list):
             start = pos*self.bs
             end = start+self.bs
             for input_inode_set in inode_sets:
-                size = self.inodes[input_inode_set[0]][0]
+                size = self.inodes[input_inode_set[0]].size
                 new_inode_sets = input_inode_set.split_inode_set_by_range(start, self.bs)
 
                 if size<=end:
